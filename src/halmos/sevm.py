@@ -612,6 +612,7 @@ class Exec:  # an execution path
     # network
     code: Dict[Address, Contract]
     storage: Dict[Address, Dict[int, Any]]  # address -> { storage slot -> value }
+    transient_storage: Dict[Address, Dict[int, Any]] # address -> { storage slot -> value }
     balance: Any  # address -> balance
 
     # block
@@ -648,6 +649,7 @@ class Exec:  # an execution path
         self.code = kwargs["code"]
         self.storage = kwargs["storage"]
         self.balance = kwargs["balance"]
+        self.transient_storage = kwargs["transient_storage"]
         #
         self.block = kwargs["block"]
         #
@@ -943,8 +945,10 @@ class Exec:  # an execution path
                 deployed_hexcode = deployed_hexcode.replace(placeholder, hex_address)
 
         return (creation_hexcode, deployed_hexcode)
-
-
+    
+    def finalize_transaction(self):
+        self.transient_storage.clear()
+        
 class Storage:
     pass
 
@@ -1185,6 +1189,47 @@ class GenericStorage(Storage):
 
 
 SomeStorage = TypeVar("SomeStorage", bound=Storage)
+
+class TransientStorage(Storage): 
+    @classmethod
+    def empty(cls, addr: BitVecRef, loc: BitVecRef) -> ArrayRef:
+        return Array(
+            f"transient_storage_{id_str(addr)}_{loc.size()}_00",
+            BitVecSorts[loc.size()],
+            BitVecSort256,
+        )
+    
+    @classmethod
+    def init(cls, ex: Exec, addr: Any, loc: BitVecRef) -> None:
+        assert_address(addr)
+        if addr not in ex.transient_storage:
+            ex.transient_storage[addr] = {}
+        if loc.size() not in ex.transient_storage[addr]:
+            ex.transient_storage[addr][loc.size()] = cls.empty(addr, loc)
+            
+    @classmethod
+    def load(cls, ex: Exec, addr: Any, loc: Word) -> Word:
+        loc = cls.decode(loc)
+        cls.init(ex, addr, loc)
+        return ex.select(ex.transient_storage[addr][loc.size()], loc, ex.storages)
+
+    @classmethod
+    def store(cls, ex: Exec, addr: Any, loc: Any, val: Any) -> None:
+        loc = cls.decode(loc)
+        cls.init(ex, addr, loc)
+        new_storage_var = Array(
+            f"transient_storage_{id_str(addr)}_{loc.size()}_{1+len(ex.storages):>02}",
+            BitVecSorts[loc.size()],
+            BitVecSort256,
+        )
+        new_storage = Store(ex.transient_storage[addr][loc.size()], loc, val)
+        ex.path.append(new_storage_var == new_storage)
+        ex.transient_storage[addr][loc.size()] = new_storage_var
+        ex.storages[new_storage_var] = new_storage
+
+    @classmethod
+    def decode(cls, loc: Any) -> Any:
+        return GenericStorage.decode(loc)
 
 
 def bitwise(op, x: Word, y: Word) -> Word:
@@ -1486,6 +1531,13 @@ class SEVM:
             val = If(val, con(1), con(0))
 
         self.storage_model.store(ex, addr, loc, val)
+    
+    def tload(self, ex: Exec, addr: Any, loc: Word) -> Word:
+        return TransientStorage.load(ex, addr, loc)
+    
+    def tstore(self, ex: Exec, addr: Any, loc: Any, val: Any) -> None:
+        TransientStorage.store(ex, addr, loc, val)
+
 
     def resolve_address_alias(self, ex: Exec, target: Address) -> Address:
         if target in ex.code:
@@ -2129,6 +2181,7 @@ class SEVM:
         def finalize(ex: Exec):
             # if it's at the top-level, there is no callback; yield the current execution state
             if ex.callback is None:
+                ex.finalize_transaction()
                 yield ex
 
             # otherwise, execute the callback to return to the parent execution context
@@ -2411,6 +2464,15 @@ class SEVM:
                     slot: Word = ex.st.pop()
                     value: Word = ex.st.pop()
                     self.sstore(ex, ex.this, slot, value)
+                
+                elif opcode == EVM.TLOAD:
+                    slot: Word = ex.st.pop()
+                    ex.st.push(self.tload(ex, ex.this, slot))
+                
+                elif opcode == EVM.TSTORE:
+                    slot: Word = ex.st.pop()
+                    value: Word = ex.st.pop()
+                    self.tstore(ex, ex.this, slot, value)
 
                 elif opcode == EVM.RETURNDATASIZE:
                     ex.st.push(ex.returndatasize())
@@ -2580,6 +2642,7 @@ class SEVM:
             code=code,
             storage=storage,
             balance=balance,
+            transient_storage={},
             #
             block=block,
             #

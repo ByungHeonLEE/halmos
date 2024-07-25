@@ -573,6 +573,8 @@ class EVM:
     MSIZE = 0x59
     GAS = 0x5A
     JUMPDEST = 0x5B
+    TLOAD = 0x5C
+    TSTORE = 0x5D
     MCOPY = 0x5E
     PUSH0 = 0x5F
     PUSH1 = 0x60
@@ -715,6 +717,8 @@ str_opcode: Dict[int, str] = {
     EVM.MSTORE8: "MSTORE8",
     EVM.SLOAD: "SLOAD",
     EVM.SSTORE: "SSTORE",
+    EVM.TLOAD: "TLOAD",
+    EVM.TSTORE: "TSTORE",
     EVM.JUMP: "JUMP",
     EVM.JUMPI: "JUMPI",
     EVM.PC: "PC",
